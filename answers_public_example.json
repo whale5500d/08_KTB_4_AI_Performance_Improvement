@@ -1,0 +1,286 @@
+{
+  "team": "0",
+  "answers": [
+    {
+      "qid": "P01",
+      "retrieved": [
+        [
+          "카카오계정 약관",
+          10
+        ],
+        [
+          "카카오계정 약관",
+          4
+        ],
+        [
+          "카카오계정 약관",
+          7
+        ],
+        [
+          "카카오계정 약관",
+          6
+        ]
+      ],
+      "answer": "여기에 결과기가 만든 답변 본문이 들어갑니다. 이 파일의 답변은 형식을 보여주기 위한 더미이며 정답이 아닙니다."
+    },
+    {
+      "qid": "P02",
+      "retrieved": [
+        [
+          "카카오 통합 약관",
+          13
+        ]
+      ],
+      "answer": "근거 조항은 실제 답변에 사용한 것만 관련도 순으로 넣습니다. 이 문항은 1개만 넣은 예입니다."
+    },
+    {
+      "qid": "P03",
+      "retrieved": [
+        [
+          "카카오계정 약관",
+          7
+        ],
+        [
+          "카카오계정 약관",
+          1
+        ]
+      ],
+      "answer": "이 문항은 2개를 넣은 예입니다. 1개에서 4개 사이면 됩니다."
+    },
+    {
+      "qid": "P04",
+      "retrieved": [
+        [
+          "카카오 위치정보 이용약관",
+          6
+        ],
+        [
+          "카카오 위치정보 이용약관",
+          10
+        ],
+        [
+          "카카오 위치정보 이용약관",
+          2
+        ],
+        [
+          "카카오 통합 약관",
+          16
+        ]
+      ],
+      "answer": "조번호는 따옴표 없는 숫자입니다. 문자열로 넣으면 형식이 달라집니다."
+    },
+    {
+      "qid": "P05",
+      "retrieved": [
+        [
+          "카카오 위치정보 이용약관",
+          8
+        ],
+        [
+          "카카오 위치정보 이용약관",
+          9
+        ],
+        [
+          "카카오 위치정보 이용약관",
+          10
+        ],
+        [
+          "카카오 통합 약관",
+          16
+        ]
+      ],
+      "answer": "문서명은 채점 대상 약관 4종의 명칭을 그대로 씁니다."
+    },
+    {
+      "qid": "P06",
+      "retrieved": [
+        [
+          "카카오 통합서비스약관",
+          4
+        ],
+        [
+          "카카오 통합서비스약관",
+          5
+        ],
+        [
+          "카카오 통합서비스약관",
+          1
+        ]
+      ],
+      "answer": "답변 길이에는 제한이 없습니다. 이 문장들은 분량 기준이 아닙니다."
+    },
+    {
+      "qid": "P07",
+      "retrieved": [
+        [
+          "카카오 통합서비스약관",
+          1
+        ],
+        [
+          "카카오 통합 약관",
+          1
+        ],
+        [
+          "카카오 통합서비스약관",
+          3
+        ],
+        [
+          "카카오 통합서비스약관",
+          15
+        ]
+      ],
+      "answer": "retrieved가 0개이거나 5개 이상이면 형식 검사를 통과하지 못합니다."
+    },
+    {
+      "qid": "P08",
+      "retrieved": [
+        [
+          "카카오 통합 약관",
+          3
+        ],
+        [
+          "카카오 통합서비스약관",
+          3
+        ],
+        [
+          "카카오계정 약관",
+          3
+        ],
+        [
+          "카카오 통합서비스약관",
+          18
+        ]
+      ],
+      "answer": "이 파일은 2번 셀이 자동으로 만듭니다. 직접 작성하거나 수정하지 않습니다."
+    },
+    {
+      "qid": "P09",
+      "retrieved": [
+        [
+          "카카오 통합 약관",
+          10
+        ],
+        [
+          "카카오 통합서비스약관",
+          9
+        ],
+        [
+          "카카오계정 약관",
+          11
+        ],
+        [
+          "카카오 통합 약관",
+          14
+        ]
+      ],
+      "answer": "meta 블록도 2번 셀이 채웁니다. 손대지 않습니다."
+    },
+    {
+      "qid": "P10",
+      "retrieved": [
+        [
+          "카카오 위치정보 이용약관",
+          12
+        ],
+        [
+          "카카오 위치정보 이용약관",
+          11
+        ],
+        [
+          "카카오 통합 약관",
+          16
+        ],
+        [
+          "카카오 위치정보 이용약관",
+          10
+        ]
+      ],
+      "answer": "실행이 끝나면 내 파일을 이 예시와 나란히 열어 모양을 대조해 보세요."
+    }
+  ],
+  "meta": {
+    "doc_name_violations": [],
+    "timeout_qids": [],
+    "env_warnings": [],
+    "transport": "http",
+    "performance": {
+      "version": 2,
+      "transport": "http",
+      "requests": 12,
+      "concurrency": 2,
+      "success": 12,
+      "fail": 0,
+      "success_rate": 1.0,
+      "throughput_rps": 0.2401,
+      "wall_s": 49.9769,
+      "p50_latency_s": 7.0205,
+      "p95_latency_s": 14.2841,
+      "errors": [],
+      "summary_method": "median",
+      "protocol": {
+        "requests_per_run": 12,
+        "concurrency": 2,
+        "warmup_requests": 2,
+        "repetitions": 3
+      },
+      "samples": [
+        {
+          "repetition": 1,
+          "transport": "http",
+          "requests": 12,
+          "concurrency": 2,
+          "success": 12,
+          "fail": 0,
+          "success_rate": 1.0,
+          "throughput_rps": 0.2401,
+          "wall_s": 49.9769,
+          "p50_latency_s": 7.0205,
+          "p95_latency_s": 14.2841,
+          "errors": []
+        },
+        {
+          "repetition": 2,
+          "transport": "http",
+          "requests": 12,
+          "concurrency": 2,
+          "success": 12,
+          "fail": 0,
+          "success_rate": 1.0,
+          "throughput_rps": 0.2063,
+          "wall_s": 58.1578,
+          "p50_latency_s": 7.7433,
+          "p95_latency_s": 16.8096,
+          "errors": []
+        },
+        {
+          "repetition": 3,
+          "transport": "http",
+          "requests": 12,
+          "concurrency": 2,
+          "success": 12,
+          "fail": 0,
+          "success_rate": 1.0,
+          "throughput_rps": 0.2451,
+          "wall_s": 48.9651,
+          "p50_latency_s": 6.5681,
+          "p95_latency_s": 14.2038,
+          "errors": []
+        }
+      ],
+      "warmup": {
+        "repetition": 0,
+        "transport": "http",
+        "requests": 2,
+        "concurrency": 2,
+        "success": 2,
+        "fail": 0,
+        "success_rate": 1.0,
+        "throughput_rps": 0.3541,
+        "wall_s": 5.6485,
+        "p50_latency_s": 2.6785,
+        "p95_latency_s": 2.6785,
+        "errors": []
+      }
+    }
+  }
+}
