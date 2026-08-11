@@ -1,0 +1,29 @@
+{
+  "results": [
+    {
+      "blind_id": "BLIND01",
+      "total": 72.3147,
+      "status": "completed"
+    },
+    {
+      "blind_id": "BLIND02",
+      "total": 68.9021,
+      "status": "completed"
+    },
+    {
+      "blind_id": "BLIND03",
+      "total": 81.4756,
+      "status": "completed"
+    },
+    {
+      "blind_id": "BLIND04",
+      "total": 75.0083,
+      "status": "completed"
+    },
+    {
+      "blind_id": "BLIND05",
+      "total": 63.7792,
+      "status": "completed"
+    }
+  ]
+}
