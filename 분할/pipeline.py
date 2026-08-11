@@ -292,10 +292,13 @@ class GenerationConfig(BaseModel):
     max_answer_chars: int = 900
     never_abstain: bool = True
     # 추가 필드 (Upgrade-2 · 결정론 계층)
-    key_unit_top_n: int = 4             # 프롬프트에 명시할 핵심 근거 단위 수
-    key_unit_min_score: float = 0.15    # 핵심 단위 채택 하한(재순위 sigmoid 또는 겹침)
+    key_unit_top_n: int = 3             # 프롬프트에 명시할 핵심 근거 단위 수
+    key_unit_min_score: float = 0.20    # 핵심 단위 채택 하한(question_relevance_score와 동일 축)
     key_unit_max_chars: int = 320       # 핵심 단위 1건 표시 상한
     grounded_threshold: float = 0.42    # 이 미만으로 조문과 겹치는 문장은 삭제(환각 차단)
+    # 선별된 근거 단위와 이 미만으로 겹치는 문장은 삭제(주제 이탈 차단).
+    # 답변은 근거를 풀어 쓰므로 조문 원문 겹침보다 낮게 잡는다.
+    evidence_threshold: float = 0.30
     coverage_threshold: float = 0.32    # 핵심 단위가 이 미만으로 반영되면 원문 보충
     max_coverage_repairs: int = 2       # 원문 보충 문장 수 상한(정밀도 보호)
     enum_item_max_chars: int = 260      # 열거형 항목 1건 복사 상한
@@ -1385,80 +1388,179 @@ def render_context_block(retrieval: RetrievalOutput, config: GenerationConfig) -
     return "\n\n".join(blocks)
 
 
+UNIT_SELECTION_SYSTEM = (
+    "당신은 약관 조문에서 질문에 답하는 데 필요한 문장만 골라내는 선별기입니다. "
+    "설명 없이 번호만 출력합니다."
+)
+
+UNIT_SELECTION_PROMPT = (
+    "아래는 약관 한 개 조의 문장들입니다. 질문에 답하려면 반드시 필요한 문장의 번호만 "
+    "쉼표로 구분해 출력하십시오.\n"
+    "규칙:\n"
+    "- 질문이 묻는 내용을 직접 답하는 문장만 고릅니다.\n"
+    "- 같은 조에 있더라도 질문과 상관없는 내용이면 고르지 않습니다.\n"
+    "- 보통 1~3개면 충분합니다. 최대 {max_n}개까지만 고릅니다.\n"
+    "- 번호 외에는 아무것도 출력하지 않습니다. 예: 2,5\n\n"
+    "[문장]\n{numbered}\n\n[질문]\n{question}\n\n[필요한 문장 번호]"
+)
+
+
+def select_units_by_llm(
+    question: str,
+    units: List[str],
+    generator: Optional["GeneratorHandle"],
+    config: GenerationConfig,
+) -> Optional[List[int]]:
+    """LLM에게 질문에 답하는 데 필요한 문장 번호만 고르게 한다.
+
+    표층 어휘 겹침으로는 원리적으로 못 푸는 구분을 여기서 처리한다. 공개 P01의
+    세 문장은 모두 "사업자/단체 카카오계정은~"으로 시작해 바이그램 점수가 0.28~0.75로
+    뭉치지만("1인만 이용/공유 금지"만 정답), 의미로 보면 어느 것이 질문에 답하는지는
+    자명하다. 이미 GPU에 올라가 있는 생성 모델을 선별기로 재사용하므로 추가 모델
+    적재가 없고, 출력이 번호 몇 개뿐이라 지연 비용도 1~2초 수준이다.
+
+    실패(모델 없음·파싱 불가·범위 초과)하면 None을 돌려주고 호출부가 기존 점수
+    방식으로 폴백한다. 선별 실패가 답변 실패가 되어서는 안 된다.
+    """
+    import re
+
+    if generator is None or generator.model is None or not units:
+        return None
+
+    numbered = "\n".join(f"{i + 1}. {unit}" for i, unit in enumerate(units))
+    user_prompt = UNIT_SELECTION_PROMPT.format(
+        numbered=numbered, question=question, max_n=config.key_unit_top_n
+    )
+
+    try:
+        raw, _ = _raw_generate(
+            generator,
+            UNIT_SELECTION_SYSTEM,
+            user_prompt,
+            max_new_tokens=24,
+            prompt_lookup_num_tokens=0,
+        )
+    except Exception as exc:  # noqa: BLE001 · 선별 실패는 폴백으로 흡수
+        print(f"[경고][근거선별] LLM 선별 실패({type(exc).__name__}) · 점수 방식으로 폴백")
+        return None
+
+    found = re.findall(r"\d{1,2}", raw)
+    picked: List[int] = []
+    for token in found:
+        index = int(token) - 1
+        if 0 <= index < len(units) and index not in picked:
+            picked.append(index)
+        if len(picked) >= config.key_unit_top_n:
+            break
+
+    if not picked:
+        print(f"[경고][근거선별] 번호 파싱 실패(출력={raw[:40]!r}) · 점수 방식으로 폴백")
+        return None
+
+    picked.sort()  # 원문 등장 순서 유지
+    return picked
+
+
+def question_relevance_score(question: str, text: str) -> float:
+    """text가 question과 얼마나 관련 있는지(0~1). LLM 선별이 불가능할 때의 폴백 신호.
+
+    재순위 모델이 있으면 cross-encoder(question, text) 점수를, 없으면 문자 바이그램
+    겹침을 쓴다. 둘 다 표층 신호라 주어가 반복되는 조문에서는 변별력이 떨어진다.
+    주 경로는 select_units_by_llm이고 이 함수는 그 실패 시에만 쓰인다.
+    """
+    if _RERANKER is not None:
+        try:
+            raw = _RERANKER.predict([(question, text)], batch_size=1, show_progress_bar=False)
+            return 1.0 / (1.0 + pow(2.718281828, -float(raw[0])))
+        except Exception:  # noqa: BLE001 · 겹침으로 폴백
+            pass
+    return bigram_overlap(question, text)
+
+
 def select_key_units(
     question: str,
     retrieval: RetrievalOutput,
     config: GenerationConfig,
+    generator: Optional["GeneratorHandle"] = None,
 ) -> List[str]:
-    """상위 조를 항/호 단위로 쪼개 질문 관련도 순으로 핵심 근거 단위를 뽑는다.
+    """1순위 조 → 도메인 규칙 필터 → LLM 의미 선별 → 핵심 근거 단위 목록.
 
-    골드 키팩트가 약관 원문 문장을 그대로 옮긴 것이므로, 답변이 반드시 담아야 할
-    원문 단위를 여기서 확정한다. 재순위 모델이 있으면 cross-encoder 점수로,
-    없으면 문자 바이그램 겹침으로 매긴다. 이 목록이
-      (1) 프롬프트의 [핵심 근거] 블록(생성 유도, 동적 맥락)과
-      (2) 생성 후 커버리지 수리(누락 시 원문 보충)
-    양쪽에 쓰인다.
+    3단 구성이고 각 단계가 서로 다른 종류의 오류를 담당한다.
+      1) 도메인 규칙: 안내문 제거(골드 26건 중 0건이므로 위양성 위험 없음),
+         질문이 정의를 묻지 않으면 정의문 제외.
+      2) LLM 선별  : 남은 규범문 중 "이 질문에 답하는 것"을 의미로 고른다.
+      3) 폴백      : LLM 선별이 실패하면 재순위/겹침 점수 순으로 상위 N개.
+
+    이 목록이 프롬프트의 [핵심 근거] 블록과 생성 후 커버리지 수리 양쪽에 쓰인다.
     """
-    import re
-
     if not retrieval.hits:
         return []
 
-    # 상위 1~2개 조에서만 단위를 모은다. 3번째 조까지 넓히면 무관 단위가 섞인다.
+    top = retrieval.hits[0]
+    key = (top.chunk.doc_name, top.chunk.article_number)
+    article = ARTICLE_REGISTRY.get(key)
+    if article is None:
+        article = Article(
+            doc_name=top.chunk.doc_name,
+            article_number=top.chunk.article_number,
+            article_title=top.chunk.article_title,
+            body=top.chunk.text,
+        )
+
+    raw_units = extract_provision_units(article, config)
+    if not raw_units:
+        return []
+
+    # 1) 도메인 규칙 필터
+    want_definition = asks_for_definition(question)
     units: List[str] = []
-    seen_articles: set[Tuple[str, int]] = set()
-    for hit in retrieval.hits:
-        key = (hit.chunk.doc_name, hit.chunk.article_number)
-        if key in seen_articles:
+    for unit in raw_units:
+        kind = classify_provision(unit)
+        if kind == "안내문":
+            print(f"[근거선별] 안내문 제외: {unit[:50]!r}")
             continue
-        seen_articles.add(key)
-        article = ARTICLE_REGISTRY.get(key)
-        body = article.body if article is not None else hit.chunk.text
-        for _label, paragraph in split_article_paragraphs(body, 30):
-            for sentence in split_sentences(paragraph):
-                compact = re.sub(r"\s+", " ", sentence).strip()
-                if 20 <= len(compact) <= config.key_unit_max_chars * 2:
-                    units.append(compact[: config.key_unit_max_chars])
-        if len(seen_articles) >= 2:
-            break
+        if kind == "정의문" and not want_definition:
+            # 열거형 질문은 호 목록 자체가 답이므로 정의문이어도 남긴다.
+            if not is_enumeration_question(question):
+                print(f"[근거선별] 정의문 제외(질문이 정의를 묻지 않음): {unit[:50]!r}")
+                continue
+        units.append(unit)
 
     if not units:
-        return []
-    units = list(dict.fromkeys(units))  # 순서 보존 중복 제거
+        units = raw_units  # 전부 걸러졌으면 규칙을 포기하고 원본을 쓴다
 
-    scored: List[Tuple[float, int, str]] = []
-    if _RERANKER is not None and len(units) > 1:
-        try:
-            pairs = [(question, unit) for unit in units]
-            raw = _RERANKER.predict(pairs, batch_size=16, show_progress_bar=False)
-            for order, (value, unit) in enumerate(zip(raw, units)):
-                sigmoid = 1.0 / (1.0 + pow(2.718281828, -float(value)))
-                scored.append((sigmoid, order, unit))
-        except Exception as exc:  # noqa: BLE001 · 겹침 점수로 폴백
-            print(f"[경고][핵심단위] 재순위 실패({type(exc).__name__}) · 겹침 점수 사용")
-            scored = []
-    if not scored:
-        scored = [
-            (bigram_overlap(question, unit), order, unit)
-            for order, unit in enumerate(units)
-        ]
+    # 2) LLM 의미 선별
+    picked = select_units_by_llm(question, units, generator, config)
+    if picked is not None:
+        chosen = [units[i] for i in picked]
+        print(f"[근거선별] LLM 선별 {len(chosen)}/{len(units)}건 채택")
+        return chosen
 
+    # 3) 폴백 — 표층 점수
+    scored = [
+        (question_relevance_score(question, unit), order, unit)
+        for order, unit in enumerate(units)
+    ]
     scored.sort(key=lambda item: item[0], reverse=True)
-    picked = [
+    fallback = [
         (order, unit)
         for score, order, unit in scored[: config.key_unit_top_n]
         if score >= config.key_unit_min_score
     ]
-    if not picked and scored:  # 하한 미달이어도 최상위 1건은 유지한다
-        picked = [(scored[0][1], scored[0][2])]
-    picked.sort(key=lambda item: item[0])  # 원문 등장 순서로 재정렬
-    return [unit for _order, unit in picked]
+    if not fallback and scored:
+        fallback = [(scored[0][1], scored[0][2])]
+    fallback.sort(key=lambda item: item[0])
+    return [unit for _order, unit in fallback]
 
 
-def build_prompt(retrieval: RetrievalOutput, config: GenerationConfig) -> PromptBundle:
+def build_prompt(
+    retrieval: RetrievalOutput,
+    config: GenerationConfig,
+    generator: Optional["GeneratorHandle"] = None,
+) -> PromptBundle:
     """RetrievalOutput → PromptBundle. 조 단위 근거 + 문항별 핵심 근거 단위를 담는다."""
     context_block = render_context_block(retrieval, config)
-    key_units = select_key_units(retrieval.question, retrieval, config)
+    key_units = select_key_units(retrieval.question, retrieval, config, generator)
 
     parts: List[str] = []
     if config.use_few_shot and not _STYLE_ADAPTER_APPLIED:
@@ -1490,6 +1592,93 @@ def primary_citation(context_block: str) -> str:
     if not match:
         return ""
     return f"({match.group(1).strip()} 제{int(match.group(2))}조)"
+
+
+# =====================================================================================
+# 12-0. 카카오 약관 도메인 분석 (추가, Upgrade-3)
+# =====================================================================================
+# 4종 약관을 골드셋과 대조해 얻은 구조적 사실을 코드로 옮긴 계층이다.
+#
+#   · 입도(granularity): 골드 키팩트 26건은 전부 단일 문장이고, 조 본문의 항(項)
+#     한 개 또는 그 안의 문장 하나와 대응한다. 따라서 근거 추출 단위는 '항 → 문장'이다.
+#   · 문장 유형: 카카오 약관 조문은 (a) 규범문 (b) 정의문 (c) 서두 안내문으로 나뉜다.
+#     골드 키팩트 26건 중 안내문 마커가 붙은 것은 0건인 반면, 실제 과다포함 사례
+#     7건 중 3건이 안내문이었다("~마련하였습니다", "~읽어주시기 바랍니다").
+#     안내문은 규범적 효력이 없어 어떤 질문에도 정답 근거가 될 수 없다 → 무조건 제외.
+#   · 조 경계: 골드 키팩트는 항상 1순위 조 하나 안에서 나온다. 정답 조가 여러 개인
+#     문항(P02)도 같은 내용이 3개 문서에 중복 규정된 경우일 뿐 내용은 하나다.
+#     → 근거 단위는 1순위 조에서만 모은다. 2순위 조까지 넓히면 다른 조의 정의 조항이
+#     섞여 들어온다(공개 P03에서 제1조 "카카오계정:" 정의가 제7조 답변에 혼입).
+#
+# 안내문 제거는 위양성 위험이 0에 가까워 규칙으로 처리하고, 남은 규범문 중
+# "이 질문에 답하는 것"을 고르는 일은 의미 판단이라 규칙 대신 LLM에 맡긴다.
+
+PREAMBLE_PATTERNS = (
+    r"마련하였습니다",
+    r"읽어주시기\s*바랍니다",
+    r"다가(갈|갈 수)\s*있도록",
+    r"안내드립니다",
+    r"말씀드립니다",
+    r"살펴봐\s*주시기",
+    r"확인해\s*주시기\s*바랍니다",
+    r"참고해\s*주시기",
+)
+
+DEFINITION_PATTERNS = (
+    r"^\s*\d+[.)]\s*[^:：]{1,25}\s*[:：]\s*\S",   # "1. 카카오계정: ..."
+    r"(이라\s*함은|라\s*함은)",
+    r"(을|를)\s*말합니다\s*[.。]?\s*$",
+)
+
+
+def classify_provision(text: str) -> str:
+    """조문 문장을 '안내문' / '정의문' / '규범문'으로 분류한다.
+
+    안내문은 약관 서두의 비규범적 설명이라 정답 근거가 될 수 없다(골드 26건 중 0건).
+    정의문은 질문이 용어 뜻을 물을 때만 근거가 되므로 별도로 표시해 둔다.
+    """
+    import re
+
+    if any(re.search(p, text) for p in PREAMBLE_PATTERNS):
+        return "안내문"
+    if any(re.search(p, text) for p in DEFINITION_PATTERNS):
+        return "정의문"
+    return "규범문"
+
+
+def asks_for_definition(question: str) -> bool:
+    """질문이 용어의 정의·의미를 묻는지 판정한다. 정의문 채택 여부를 가른다."""
+    import re
+
+    return bool(
+        re.search(r"(무엇을?\s*(말|의미|뜻)|정의|의미하나요|뜻이|말하나요|무엇인가요)", question)
+    )
+
+
+def extract_provision_units(
+    article: "Article",
+    config: GenerationConfig,
+) -> List[str]:
+    """조(條) → 답변 근거가 될 수 있는 문장 단위 목록.
+
+    항(項) 단위로 먼저 쪼갠 뒤 문장으로 내린다(골드 키팩트 입도와 일치).
+    호(1. 2. ...) 목록은 열거형 전용 경로가 따로 처리하므로 여기서 쪼개지 않고
+    항 전체를 한 단위로 유지해 목록이 흩어지지 않게 한다.
+    """
+    import re
+
+    units: List[str] = []
+    for _label, paragraph in split_article_paragraphs(article.body, 30):
+        compact_para = re.sub(r"\s+", " ", paragraph).strip()
+        has_list = len(re.findall(r"(?m)^\s*\d{1,2}[.)]\s", paragraph)) >= 2
+        pieces = [compact_para] if has_list else [
+            re.sub(r"\s+", " ", s).strip() for s in split_sentences(paragraph)
+        ]
+        for piece in pieces:
+            if not (20 <= len(piece) <= config.key_unit_max_chars):
+                continue
+            units.append(piece)
+    return list(dict.fromkeys(units))
 
 
 # =====================================================================================
@@ -1588,12 +1777,26 @@ def strip_inline_citations(text: str) -> str:
     return re.sub(r"\s*" + CITATION_PAREN_PATTERN, "", text)
 
 
-def groundedness_filter(answer: str, context_text: str, config: GenerationConfig) -> str:
-    """조문과 충분히 겹치지 않는 문장을 삭제한다(환각 차단).
+def groundedness_filter(
+    answer: str,
+    context_text: str,
+    question: str,
+    config: GenerationConfig,
+    key_units: Optional[List[str]] = None,
+) -> str:
+    """조문에 없거나 선별된 근거 밖의 문장을 삭제한다(환각 + 주제 이탈 차단).
 
-    공개 P09에서 모델이 원문과 정반대인 문장("회사가 모든 권한을 가진다")을 창작해
-    accuracy 3/10을 맞았다. 판정 내부 비중이 정확성 40%라 환각 1문장이 가장 비싸다.
-    원문을 그대로 옮긴 문장은 바이그램 겹침이 높게 나오므로 임계 미만 문장을 지운다.
+    두 실패를 서로 다른 기준으로 잡는다.
+      · 환각      : 조문에 없는 내용을 창작(공개 P09 "회사가 모든 권한을 가진다").
+                    → context_text와의 겹침이 낮으면 삭제.
+      · 주제 이탈 : 조문에는 있지만 이 질문엔 불필요한 문장(공개 P01·P05 사례).
+                    → key_units(LLM이 의미로 고른 근거)와의 겹침이 낮으면 삭제.
+
+    핵심은 두 번째 기준의 대조 대상이다. 이전 판은 질문과의 어휘 겹침으로 쟀는데,
+    주어가 반복되는 조문에서는 변별이 안 됐다(P01 세 문장이 0.28~0.75로 뭉침).
+    이제는 '이미 의미로 선별된 근거 단위'와 대조하므로, 선별에서 탈락한 조문 문장은
+    답변에 들어와도 여기서 걸린다. 어휘 신호를 더 정교하게 만드는 대신
+    비교 기준 자체를 의미 선별 결과로 바꾼 것이다.
     """
     import re
 
@@ -1601,8 +1804,10 @@ def groundedness_filter(answer: str, context_text: str, config: GenerationConfig
     if len(sentences) <= 1:
         return answer
 
+    evidence_text = " ".join(key_units) if key_units else ""
+
     kept: List[str] = []
-    for order, sentence in enumerate(sentences):
+    for sentence in sentences:
         core = re.sub(r"^(예|아니오)\s*[.,]\s*", "", sentence)
         if len(core) < 12:  # "예." 등 짧은 두괄식·번호 조각은 보존
             kept.append(sentence)
@@ -1610,11 +1815,14 @@ def groundedness_filter(answer: str, context_text: str, config: GenerationConfig
         if re.match(r"^\d{1,2}[.)]\s|^[①-⑳]", sentence):  # 열거 항목은 원문 복사물
             kept.append(sentence)
             continue
-        overlap = bigram_overlap(core, context_text)
-        if overlap >= config.grounded_threshold:
-            kept.append(sentence)
-        else:
-            print(f"[정련] 근거성 미달 문장 삭제(겹침 {overlap:.2f}): {sentence[:60]!r}")
+
+        if bigram_overlap(core, context_text) < config.grounded_threshold:
+            print(f"[정련] 근거성 미달 문장 삭제(조문에 없음): {sentence[:60]!r}")
+            continue
+        if evidence_text and bigram_overlap(core, evidence_text) < config.evidence_threshold:
+            print(f"[정련] 주제 이탈 문장 삭제(선별된 근거 밖): {sentence[:60]!r}")
+            continue
+        kept.append(sentence)
 
     result = " ".join(kept).strip()
     return result if len(result) >= 15 else answer
@@ -1630,6 +1838,11 @@ def coverage_repair(
     공개 P02·P07·P10의 감점 원인이 전부 '정답 조 안의 문장 누락'이었다.
     recall을 생성 품질에 맡기지 않고 코드로 보장한다. 보충은 상한(기본 2문장)을 두어
     정밀도(무관 토큰 페널티)를 지킨다.
+
+    관련도 재검증은 여기서 하지 않는다. key_units는 이미 select_key_units가 질문 관련도로
+    걸러낸 목록이라, 여기서 같은 약한 신호(바이그램 폴백)로 다시 걸면 어휘는 안 겹치지만
+    골드 키팩트에 실제로 필요한 문장(공개 P02 "즉시 복구 노력" — 질문과 겹침 0.09에 불과)까지
+    잘못 걸러낸다. 관련도 문턱은 선별 단계(select_key_units) 하나에서만 적용한다.
     """
     repaired = answer
     n_added = 0
@@ -1730,22 +1943,30 @@ def refine_answer(
     refined = answer.strip()
 
     # (1) 열거형: 생성 결과가 조문 항목 수보다 적게 나열했으면 추출식으로 대체한다.
+    enumeration_satisfied = False
     if is_enumeration_question(question):
         extracted = build_enumeration_answer(question, retrieval, config)
         if extracted is not None:
             if count_numbered_items(refined) < count_numbered_items(extracted):
                 print("[정련] 열거형 항목 누락 감지 · 추출식 답변으로 대체")
                 refined = extracted
+            # 목록이 이미 2개 이상 번호로 채워져 있으면 완결된 것으로 본다.
+            # 이후 커버리지 수리가 같은 항목을 정의문 형태로 다시 붙이는
+            # 중복(공개 P03: "1. 통합로그인" 목록 뒤에 정의가 또 붙음)을 막는다.
+            enumeration_satisfied = count_numbered_items(refined) >= 2
 
     # (2) 본문 속 인용 괄호 제거(말미 1회로 통일). 인용 토큰은 키팩트에 없어 순손실이다.
     refined = strip_inline_citations(refined)
 
-    # (3) 환각 문장 삭제
+    # (3) 환각·주제 이탈 문장 삭제 — 조문에 실재하면서(환각 차단) 동시에
+    #     의미로 선별된 근거 안에 있어야(주제 이탈 차단) 살아남는다.
     if context_text:
-        refined = groundedness_filter(refined, context_text, config)
+        refined = groundedness_filter(
+            refined, context_text, question, config, key_units
+        )
 
-    # (4) 누락 핵심 근거 보충
-    if key_units:
+    # (4) 누락 핵심 근거 보충. 열거형이 이미 완결됐으면 건너뛴다(위 사유).
+    if key_units and not enumeration_satisfied:
         refined = coverage_repair(refined, key_units, config)
 
     # (5) 마무리: 공백 정리 + 길이 상한 + 말미 인용
@@ -2376,7 +2597,10 @@ def make_retrieve_node(ctx: PipelineContext):
 def make_augment_node(ctx: PipelineContext):
     def augment_node(state: RagState) -> Dict[str, Any]:
         assert state.retrieval is not None
-        return {"prompt": build_prompt(state.retrieval, ctx.config.generation)}
+        # 근거 선별에 생성 모델을 재사용한다(추가 모델 적재 없음).
+        return {
+            "prompt": build_prompt(state.retrieval, ctx.config.generation, ctx.generator)
+        }
 
     return augment_node
 
