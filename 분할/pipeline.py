@@ -211,7 +211,7 @@ class GenerationConfig(BaseModel):
 class StyleTuningConfig(BaseModel):
     """실행 중 self-distillation LoRA 설정. 실패하거나 예산을 넘기면 자동으로 건너뛴다."""
 
-    enabled: bool = True
+    enabled: bool = False
     n_samples: int = 64
     epochs: int = 2
     learning_rate: float = 1e-4
